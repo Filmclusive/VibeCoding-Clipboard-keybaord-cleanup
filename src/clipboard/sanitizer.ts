@@ -7,6 +7,8 @@ import {
   removeTrailingSpaces
 } from './rules';
 
+const NO_PASTABLE_TEXT = '[no pastable text]';
+
 function isProbablyCodeSnippet(input: string): boolean {
   if (!input) return false;
   if (input.includes('\t')) return true;
@@ -16,6 +18,24 @@ function isProbablyCodeSnippet(input: string): boolean {
   return false;
 }
 
+function isEffectivelyEmpty(value: string): boolean {
+  // Treat pure whitespace and quote/backtick scaffolding as "nothing pastable".
+  // This catches cases where filters removed all meaningful text but left blank lines/quotes.
+  return value.replace(/[\s"'`]+/g, '').length === 0;
+}
+
+function normalizeCodeFrameLine(line: string): string {
+  // Normalize Vite/TS/Node style code frames so they paste cleanly:
+  //   "  690 |               const x" -> "690 | const x"
+  //   "> 692 |     foo" -> "> 692 | foo"
+  const match = line.match(/^\s*(>\s*)?(\d+)\s*\|\s+(.*)$/);
+  if (!match) return line;
+  const pointer = match[1] ?? '';
+  const lineNo = match[2];
+  const content = match[3].trimStart();
+  return `${pointer}${lineNo} | ${content}`;
+}
+
 export function sanitizeClipboardText(input: string, settings: Settings): string {
   let result = input;
   result = normalizeInvisibleCharacters(
@@ -23,23 +43,55 @@ export function sanitizeClipboardText(input: string, settings: Settings): string
     settings.ruleFlags.replaceNonBreakingSpaces,
     settings.ruleFlags.removeZeroWidthSpaces
   );
+
+  const looksLikeCode = isProbablyCodeSnippet(result);
+  const isMultiline = result.includes('\n');
+
+  // Apply code-frame + log-line whitespace normalization before phrase filtering so that
+  // phrase filters can match what you actually paste.
+  if (looksLikeCode && isMultiline) {
+    const newline = result.includes('\r\n') ? '\r\n' : '\n';
+    const lines = result.split(/\r?\n/);
+    result = lines
+      .map((line) => {
+        const normalizedFrame = normalizeCodeFrameLine(line);
+        if (normalizedFrame !== line) return normalizedFrame;
+        if (settings.ruleFlags.collapseInlineSpacing && !/^\s/.test(line)) {
+          return collapseInlineSpacing(line);
+        }
+        return line;
+      })
+      .join(newline);
+  }
+
   result = removeConfiguredPhrases(result, settings.phraseFilters);
 
-  if (isProbablyCodeSnippet(result)) {
-    return result;
+  if (isEffectivelyEmpty(result)) {
+    return NO_PASTABLE_TEXT;
   }
 
+  const isCodeSnippet = looksLikeCode;
+
   if (settings.ruleFlags.collapseInlineSpacing) {
-    result = collapseInlineSpacing(result);
+    if (!isCodeSnippet) {
+      result = collapseInlineSpacing(result);
+    }
   }
   if (settings.ruleFlags.collapseBlankLines) {
+    // Safe for code snippets (it doesn't touch indentation), and helps avoid pasting giant gaps.
     result = collapseBlankLines(result);
   }
   if (settings.ruleFlags.removeTrailingSpaces) {
+    // Trailing whitespace is almost never meaningful for pasting logs/stack traces.
     result = removeTrailingSpaces(result);
   }
-  if (settings.trimWhitespace) {
+  if (settings.trimWhitespace && !isCodeSnippet) {
     result = result.trim();
   }
+
+  if (isEffectivelyEmpty(result)) {
+    return NO_PASTABLE_TEXT;
+  }
+
   return result;
 }

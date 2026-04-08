@@ -36,6 +36,18 @@ function buildFlexiblePhraseRegex(phrase: string): RegExp | null {
   return new RegExp(pattern, 'gi');
 }
 
+export function hasConfiguredPhraseMatch(input: string, phrases: string[]): boolean {
+  if (!phrases.length) return false;
+  for (const phrase of phrases) {
+    if (!phrase) continue;
+    const regex = buildFlexiblePhraseRegex(phrase);
+    if (!regex) continue;
+    regex.lastIndex = 0;
+    if (regex.test(input)) return true;
+  }
+  return false;
+}
+
 export function removeConfiguredPhrases(input: string, phrases: string[]): string {
   if (!phrases.length) {
     return input;
