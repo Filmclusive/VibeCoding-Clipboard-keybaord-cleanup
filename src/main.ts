@@ -9,15 +9,20 @@ import {
   LAST_CLEANED_EVENT,
   getLastCleanedTime
 } from './clipboard/poller';
-import { createTrayMenu, TrayMenuActions } from './tray/menu';
 import type { SanitizerRuleFlags, Settings } from './types/settings';
 
 type RuleKey = keyof SanitizerRuleFlags;
 
-type InstalledApp = {
-  bundleIdentifier?: string | null;
-  name: string;
-  iconDataUrl?: string | null;
+type TrayMenuActions = {
+  toggleCleaner: () => Promise<void>;
+  reloadSettings: () => Promise<void>;
+  openSettings: () => Promise<void>;
+  quit: () => Promise<void>;
+};
+
+type TrayMenuHandle = {
+  refresh: () => Promise<void>;
+  close: () => Promise<void>;
 };
 
 const SANITIZER_RULES: Array<{ key: RuleKey; title: string; description: string }> = [
@@ -51,7 +56,7 @@ const SANITIZER_RULES: Array<{ key: RuleKey; title: string; description: string 
 const MIN_POLL_INTERVAL_MS = 50;
 
 let pendingSettings: Settings | null = null;
-let trayMenuHandle: Awaited<ReturnType<typeof createTrayMenu>> | null = null;
+let trayMenuHandle: TrayMenuHandle | null = null;
 let trayActions: TrayMenuActions;
 
 const rootPanel = buildPanel();
@@ -63,25 +68,23 @@ const enabledToggle = rootPanel.querySelector<HTMLInputElement>('#enabledToggle'
 const pollingIntervalInput = rootPanel.querySelector<HTMLInputElement>('#pollingInterval');
 const pollingHint = rootPanel.querySelector<HTMLParagraphElement>('#pollingHint');
 const rulesContainer = rootPanel.querySelector<HTMLDivElement>('#rulesContainer');
-const phraseFilterInput = rootPanel.querySelector<HTMLInputElement>('#phraseFilterInput');
+const phraseFilterInput = rootPanel.querySelector<HTMLTextAreaElement>('#phraseFilterInput');
 const addPhraseButton = rootPanel.querySelector<HTMLButtonElement>('#addPhraseButton');
 const phraseFiltersList = rootPanel.querySelector<HTMLUListElement>('#phraseFiltersList');
 const phraseFiltersHelper = rootPanel.querySelector<HTMLParagraphElement>('#phraseFiltersHelper');
 const excludedAppsList = rootPanel.querySelector<HTMLDivElement>('#excludedAppsList');
 const excludedAppsSearch = rootPanel.querySelector<HTMLInputElement>('#excludedAppsSearch');
-const saveButton = rootPanel.querySelector<HTMLButtonElement>('#saveButton');
 const closeButton = rootPanel.querySelector<HTMLButtonElement>('#closeButton');
-const saveMessage = rootPanel.querySelector<HTMLParagraphElement>('#saveMessage');
 const trimWhitespaceToggle = rootPanel.querySelector<HTMLInputElement>('#trimWhitespaceToggle');
 const showDockIconToggle = rootPanel.querySelector<HTMLInputElement>('#showDockIconToggle');
 const showMenuBarIconToggle = rootPanel.querySelector<HTMLInputElement>('#showMenuBarIconToggle');
 const lastCleanedValue = rootPanel.querySelector<HTMLParagraphElement>('#lastCleanedValue');
 const statusDot = rootPanel.querySelector<HTMLSpanElement>('[data-status-dot]');
+const saveStatus = rootPanel.querySelector<HTMLParagraphElement>('#saveStatus');
 
 const ruleInputs = new Map<RuleKey, HTMLInputElement>();
-let installedApps: InstalledApp[] = [];
 
-wireSidebar(rootPanel);
+const sidebarApi = wireSidebar(rootPanel);
 
 SANITIZER_RULES.forEach((rule) => {
   if (!rulesContainer) return;
@@ -96,14 +99,15 @@ SANITIZER_RULES.forEach((rule) => {
     <input type="checkbox" id="ruleSwitch:${rule.key}" />
   `;
   const input = wrapper.querySelector<HTMLInputElement>('input');
-  if (input) {
-    ruleInputs.set(rule.key, input);
-    input.addEventListener('change', () => {
-      if (pendingSettings) {
-        pendingSettings.ruleFlags[rule.key] = input.checked;
-      }
-    });
-  }
+    if (input) {
+      ruleInputs.set(rule.key, input);
+      input.addEventListener('change', () => {
+        if (pendingSettings) {
+          pendingSettings.ruleFlags[rule.key] = input.checked;
+          scheduleAutoSave();
+        }
+      });
+    }
   rulesContainer.appendChild(wrapper);
 });
 
@@ -111,6 +115,7 @@ if (enabledToggle) {
   enabledToggle.addEventListener('change', () => {
     if (pendingSettings) {
       pendingSettings.enabled = enabledToggle.checked;
+      scheduleAutoSave();
     }
   });
 }
@@ -121,6 +126,7 @@ if (pollingIntervalInput) {
       const raw = Number(pollingIntervalInput.value) || MIN_POLL_INTERVAL_MS;
       pendingSettings.pollingIntervalMs = Math.max(MIN_POLL_INTERVAL_MS, raw);
       updatePollingHint(pendingSettings.pollingIntervalMs);
+      scheduleAutoSave();
     }
   });
 }
@@ -130,19 +136,20 @@ addPhraseButton?.addEventListener('click', () => {
 });
 
 phraseFilterInput?.addEventListener('keydown', (event) => {
-  if (event.key === 'Enter' && !event.shiftKey) {
+  if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
     event.preventDefault();
     handleAddPhrase();
   }
 });
 
 excludedAppsSearch?.addEventListener('input', () => {
-  renderExcludedApps();
+  excludedAppsApi?.render();
 });
 
 trimWhitespaceToggle?.addEventListener('change', () => {
   if (pendingSettings) {
     pendingSettings.trimWhitespace = trimWhitespaceToggle.checked;
+    scheduleAutoSave();
   }
 });
 
@@ -151,6 +158,7 @@ showDockIconToggle?.addEventListener('change', () => {
   pendingSettings.showDockIcon = showDockIconToggle.checked;
   enforceVisibilityMinimum(pendingSettings);
   syncVisibilityToggles(pendingSettings);
+  scheduleAutoSave();
 });
 
 showMenuBarIconToggle?.addEventListener('change', () => {
@@ -158,10 +166,7 @@ showMenuBarIconToggle?.addEventListener('change', () => {
   pendingSettings.showMenuBarIcon = showMenuBarIconToggle.checked;
   enforceVisibilityMinimum(pendingSettings);
   syncVisibilityToggles(pendingSettings);
-});
-
-saveButton?.addEventListener('click', () => {
-  void handleSave();
+  scheduleAutoSave();
 });
 
 closeButton?.addEventListener('click', () => {
@@ -181,31 +186,46 @@ window.addEventListener(LAST_CLEANED_EVENT, (event) => {
 
 updateStatus(getLastCleanedTime()?.toISOString());
 
-async function handleSave() {
-  if (!pendingSettings || !saveButton) return;
-  saveButton.disabled = true;
-  if (saveMessage) {
-    saveMessage.textContent = 'Saving settings…';
+const autoSaveState = { queued: false, running: false };
+
+function scheduleAutoSave() {
+  if (autoSaveState.running) {
+    autoSaveState.queued = true;
+    return;
   }
+  autoSaveState.running = true;
+  void persistPendingChanges().finally(() => {
+    autoSaveState.running = false;
+    if (autoSaveState.queued) {
+      autoSaveState.queued = false;
+      scheduleAutoSave();
+    }
+  });
+}
+
+async function persistPendingChanges() {
+  if (!pendingSettings) return;
+  const snapshot = cloneSettings(pendingSettings);
   try {
-    const snapshot = cloneSettings(pendingSettings);
-    enforceVisibilityMinimum(snapshot);
-    await persistSettings(snapshot);
-    pendingSettings = cloneSettings(snapshot);
-    applyPollerState(pendingSettings);
-    await applyVisibilityState(pendingSettings);
-    trayMenuHandle?.refresh();
-    if (saveMessage) {
-      saveMessage.textContent = `Saved ${formatTimestamp(new Date())}`;
+    await persistAndSyncSettings(snapshot);
+    if (saveStatus) {
+      saveStatus.textContent = '';
     }
   } catch (error) {
-    console.error('Failed to save settings', error);
-    if (saveMessage) {
-      saveMessage.textContent = 'Could not save changes.';
+    console.error('Auto-save failed', error);
+    if (saveStatus) {
+      saveStatus.textContent = 'Save failed; see console.';
     }
-  } finally {
-    saveButton.disabled = false;
   }
+}
+
+async function persistAndSyncSettings(snapshot: Settings) {
+  enforceVisibilityMinimum(snapshot);
+  await persistSettings(snapshot);
+  pendingSettings = cloneSettings(snapshot);
+  applyPollerState(pendingSettings);
+  await applyVisibilityState(pendingSettings);
+  trayMenuHandle?.refresh();
 }
 
 function applyPollerState(settings: Settings) {
@@ -240,6 +260,7 @@ async function applyVisibilityState(settings: Settings) {
 
   if (settings.showMenuBarIcon) {
     if (!trayMenuHandle) {
+      const { createTrayMenu } = await import('./tray/menu');
       trayMenuHandle = await createTrayMenu(trayActions);
       trayMenuHandle.refresh();
     }
@@ -270,8 +291,8 @@ function updatePollingHint(value: number) {
 function parsePhraseInput(value: string): string[] {
   return value
     .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
+    .map((line) => line.replace(/\r/g, ''))
+    .filter((line) => line.trim().length > 0);
 }
 
 function handleAddPhrase() {
@@ -293,6 +314,7 @@ function handleAddPhrase() {
     phraseFilterInput.value = '';
   }
   renderPhraseFilters();
+  scheduleAutoSave();
 }
 
 function renderPhraseFilters() {
@@ -317,6 +339,7 @@ function renderPhraseFilters() {
       removeButton.addEventListener('click', () => {
         pendingSettings?.phraseFilters.splice(index, 1);
         renderPhraseFilters();
+        scheduleAutoSave();
       });
       item.append(label, removeButton);
       phraseFiltersList.appendChild(item);
@@ -378,7 +401,7 @@ function syncUi(settings: Settings) {
     trimWhitespaceToggle.checked = settings.trimWhitespace;
   }
   syncVisibilityToggles(settings);
-  renderExcludedApps();
+  excludedAppsApi?.render();
   if (phraseFilterInput) {
     phraseFilterInput.value = '';
   }
@@ -386,6 +409,9 @@ function syncUi(settings: Settings) {
 }
 
 async function showSettingsWindow() {
+  if (await appWindow.isMinimized()) {
+    await appWindow.unminimize();
+  }
   await appWindow.show();
   await appWindow.setFocus();
 }
@@ -394,7 +420,6 @@ async function bootstrap() {
   const settings = await loadSettings();
   syncUi(settings);
   applyPollerState(settings);
-  void loadInstalledApps();
   trayActions = {
     toggleCleaner: async () => {
       const current = await reloadSettings();
@@ -415,7 +440,10 @@ async function bootstrap() {
       await invoke('exit_app');
     }
   };
-  await applyVisibilityState(settings);
+  // Don't block initial window render on tray/menu setup.
+  requestAnimationFrame(() => {
+    void applyVisibilityState(settings);
+  });
 }
 
 bootstrap().catch((error) => {
@@ -438,9 +466,6 @@ function buildPanel() {
           <button type="button" class="sidebar-item" data-sidebar-item data-target="view-apps">Excluded apps</button>
           <button type="button" class="sidebar-item" data-sidebar-item data-target="view-background">Background</button>
         </nav>
-        <div class="sidebar-actions" aria-label="Actions">
-          <button type="button" id="saveButton" class="primary sidebar-save">Save settings</button>
-        </div>
         <div class="sidebar-footer">
           <div class="status-row is-compact" aria-label="Cleaner status">
             <span class="status-dot" data-status-dot></span>
@@ -498,12 +523,18 @@ function buildPanel() {
               Add each phrase individually so the cleaner can check them one by one.
             </p>
           </div>
-          <div class="filter-input-row">
-            <input type="text" id="phraseFilterInput" placeholder="Enter phrase to ignore" autocomplete="off" />
+        <div class="filter-input-row">
+            <textarea id="phraseFilterInput" rows="3" placeholder="Enter phrase to ignore" autocomplete="off"></textarea>
             <button type="button" class="primary" id="addPhraseButton">Add</button>
           </div>
           <p class="helper-text">
             Paste multi-line text or use double line returns and each non-empty line becomes its own filter.
+          </p>
+          <p class="helper-text">
+            Add the filters by pressing ⌘/Ctrl + Enter so you can keep typing while copying multi-line snippets.
+          </p>
+          <p class="helper-text">
+            Filters match the exact characters you paste—indentation, pipes, and spaces all count—so copy the snippet straight from the log.
           </p>
           <p class="helper-text" id="phraseFiltersHelper"></p>
           <ul id="phraseFiltersList" class="phrase-filter-list" aria-live="polite"></ul>
@@ -538,10 +569,10 @@ function buildPanel() {
         </section>
 
         <footer class="panel-footer">
-          <p class="helper-text" id="saveMessage"></p>
           <div class="button-row">
             <button type="button" id="closeButton" class="ghost">Close window</button>
           </div>
+          <p class="helper-text" id="saveStatus" aria-live="polite"></p>
         </footer>
       </main>
     </div>
@@ -552,7 +583,7 @@ function buildPanel() {
 function wireSidebar(panel: HTMLElement) {
   const items = Array.from(panel.querySelectorAll<HTMLButtonElement>('[data-sidebar-item]'));
   const views = Array.from(panel.querySelectorAll<HTMLElement>('[data-view]'));
-  if (!items.length || !views.length) return;
+  if (!items.length || !views.length) return { showView: (_targetId: string) => {} };
 
   const showView = (targetId: string) => {
     items.forEach((item) => {
@@ -571,96 +602,54 @@ function wireSidebar(panel: HTMLElement) {
   });
 
   showView(items[0]?.dataset.target ?? views[0]?.id ?? 'view-cleaner');
+
+  return { showView };
 }
 
-async function loadInstalledApps() {
-  try {
-    installedApps = (await invoke('list_installed_apps')) as InstalledApp[];
-  } catch (error) {
-    console.error('Failed to load installed apps', error);
-    installedApps = [];
-  } finally {
-    renderExcludedApps();
-  }
-}
+let excludedAppsApi: null | { ensureLoaded: () => void; render: () => void } = null;
 
-function renderExcludedApps() {
-  if (!excludedAppsList) return;
+function ensureExcludedAppsApi() {
+  if (excludedAppsApi) return excludedAppsApi;
+  if (!excludedAppsList) return null;
 
-  const query = excludedAppsSearch?.value?.trim().toLowerCase() ?? '';
-  const excluded = new Set((pendingSettings?.excludedApps ?? []).map((value) => value.toLowerCase()));
-
-  excludedAppsList.innerHTML = '';
-
-  if (!installedApps.length) {
-    const empty = document.createElement('p');
-    empty.className = 'helper-text';
-    empty.textContent = 'No applications found to display.';
-    excludedAppsList.appendChild(empty);
-    return;
-  }
-
-  const filtered = installedApps.filter((app) => {
-    if (!query) return true;
-    const name = app.name?.toLowerCase() ?? '';
-    const bundle = app.bundleIdentifier?.toLowerCase() ?? '';
-    return name.includes(query) || bundle.includes(query);
-  });
-
-  filtered.forEach((app) => {
-    const identifier = (app.bundleIdentifier || app.name).trim();
-    const key = identifier.toLowerCase();
-    const isExcluded = excluded.has(key);
-
-    const row = document.createElement('div');
-    row.className = 'app-row';
-
-    const icon = document.createElement('div');
-    icon.className = 'app-icon';
-    if (app.iconDataUrl) {
-      const img = document.createElement('img');
-      img.alt = '';
-      img.src = app.iconDataUrl;
-      img.loading = 'lazy';
-      icon.appendChild(img);
-    } else {
-      icon.textContent = app.name.slice(0, 1).toUpperCase();
+  excludedAppsApi = {
+    ensureLoaded: () => {
+      void (async () => {
+        const mod = await import('./views/excluded-apps');
+        excludedAppsApi = mod.initExcludedApps({
+          listEl: excludedAppsList,
+          searchEl: excludedAppsSearch ?? null,
+          getSettings: () => pendingSettings,
+          setExcludedApps: (next) => {
+            if (!pendingSettings) return;
+            pendingSettings.excludedApps = next;
+            scheduleAutoSave();
+          }
+        });
+        excludedAppsApi.ensureLoaded();
+      })();
+    },
+    render: () => {
+      // Before the module is loaded, show a lightweight placeholder.
+      if (!excludedAppsList) return;
+      excludedAppsList.innerHTML = '';
+      const placeholder = document.createElement('p');
+      placeholder.className = 'helper-text';
+      placeholder.textContent = 'Open this tab to load installed apps.';
+      excludedAppsList.appendChild(placeholder);
     }
+  };
 
-    const meta = document.createElement('div');
-    meta.className = 'app-meta';
-    const title = document.createElement('p');
-    title.className = 'app-name';
-    title.textContent = app.name;
-    const subtitle = document.createElement('p');
-    subtitle.className = 'app-subtitle';
-    subtitle.textContent = app.bundleIdentifier ?? 'App';
-    meta.appendChild(title);
-    meta.appendChild(subtitle);
-
-    const toggleLabel = document.createElement('label');
-    toggleLabel.className = 'app-toggle';
-    const toggle = document.createElement('input');
-    toggle.type = 'checkbox';
-    toggle.checked = isExcluded;
-    toggle.setAttribute('aria-label', `Exclude ${app.name}`);
-    toggle.addEventListener('change', () => {
-      if (!pendingSettings) return;
-      const normalized = identifier.trim();
-      const normalizedKey = normalized.toLowerCase();
-      const next = pendingSettings.excludedApps.filter(
-        (entry) => entry.toLowerCase() !== normalizedKey
-      );
-      if (toggle.checked) {
-        next.push(normalized);
-      }
-      pendingSettings.excludedApps = next;
-    });
-    toggleLabel.appendChild(toggle);
-
-    row.appendChild(icon);
-    row.appendChild(meta);
-    row.appendChild(toggleLabel);
-    excludedAppsList.appendChild(row);
-  });
+  return excludedAppsApi;
 }
+
+// Lazy-load expensive installed-app scanning only when the user opens the tab.
+const excludedApi = ensureExcludedAppsApi();
+excludedApi?.render();
+const originalShowView = sidebarApi.showView;
+sidebarApi.showView = (targetId: string) => {
+  originalShowView(targetId);
+  if (targetId === 'view-apps') {
+    ensureExcludedAppsApi()?.ensureLoaded();
+  }
+};

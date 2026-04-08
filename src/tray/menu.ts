@@ -1,6 +1,5 @@
 import { Menu } from '@tauri-apps/api/menu';
 import { TrayIcon } from '@tauri-apps/api/tray';
-import { defaultWindowIcon } from '@tauri-apps/api/app';
 import { getCachedSettings } from '../runtime/settings';
 
 export interface TrayMenuActions {
@@ -62,12 +61,15 @@ export async function createTrayMenu(actions: TrayMenuActions) {
   });
 
   menu = menuInstance;
-  const icon = await defaultWindowIcon();
   const tray = await TrayIcon.new({
-    icon,
     menu: menuInstance,
     tooltip: 'Clipboard Cleaner',
-    showMenuOnLeftClick: true
+    showMenuOnLeftClick: false,
+    action: (event) => {
+      if (event.type === 'Click' && event.button === 'Left' && event.buttonState === 'Up') {
+        void actions.openSettings();
+      }
+    }
   });
 
   await updateToggleLabel();

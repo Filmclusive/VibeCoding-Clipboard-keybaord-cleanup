@@ -1,8 +1,17 @@
-import { BaseDirectory, mkdir, readTextFile, writeTextFile } from '@tauri-apps/plugin-fs';
+import { mkdir, readTextFile, writeTextFile } from '@tauri-apps/plugin-fs';
+import { appConfigDir, join } from '@tauri-apps/api/path';
 import { Settings, defaultSettings } from '../types/settings';
 
 const SETTINGS_FOLDER = 'clipboard-cleaner';
 const SETTINGS_FILE = 'settings.json';
+
+async function resolveSettingsPaths(): Promise<{ folderPath: string; filePath: string }> {
+  // Using absolute paths avoids any scope/baseDir ambiguity and ensures parent dirs are created.
+  const base = await appConfigDir();
+  const folderPath = await join(base, SETTINGS_FOLDER);
+  const filePath = await join(folderPath, SETTINGS_FILE);
+  return { folderPath, filePath };
+}
 
 let cachedSettings: Settings = structuredClone(defaultSettings);
 
@@ -40,11 +49,13 @@ function normalizeLoaded(value: Partial<Settings>): Settings {
 
 export async function loadSettings(): Promise<Settings> {
   try {
-    await mkdir(SETTINGS_FOLDER, { dir: BaseDirectory.AppConfig, recursive: true });
-    const payload = await readTextFile(`${SETTINGS_FOLDER}/${SETTINGS_FILE}`, { baseDir: BaseDirectory.AppConfig });
+    const { folderPath, filePath } = await resolveSettingsPaths();
+    await mkdir(folderPath, { recursive: true });
+    const payload = await readTextFile(filePath);
     const parsed = JSON.parse(payload) as Partial<Settings>;
     cachedSettings = normalizeLoaded(parsed);
   } catch (err) {
+    console.warn('Falling back to default settings', err);
     cachedSettings = structuredClone(defaultSettings);
   }
   return copySettings(cachedSettings);
@@ -56,10 +67,9 @@ export function getCachedSettings(): Settings {
 
 export async function persistSettings(next: Settings): Promise<void> {
   try {
-    await mkdir(SETTINGS_FOLDER, { dir: BaseDirectory.AppConfig, recursive: true });
-    await writeTextFile(`${SETTINGS_FOLDER}/${SETTINGS_FILE}`, JSON.stringify(next, null, 2), {
-      baseDir: BaseDirectory.AppConfig
-    });
+    const { folderPath, filePath } = await resolveSettingsPaths();
+    await mkdir(folderPath, { recursive: true });
+    await writeTextFile(filePath, JSON.stringify(next, null, 2));
     cachedSettings = normalizeLoaded(next);
   } catch (err) {
     console.error('Failed to persist settings', err);

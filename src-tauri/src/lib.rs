@@ -1,6 +1,8 @@
 use base64::Engine;
 use serde::Serialize;
 use tauri::AppHandle;
+use tauri::Manager;
+use tauri::RunEvent;
 use tauri::WindowEvent;
 
 #[derive(Debug, Serialize)]
@@ -213,9 +215,19 @@ fn capture_frontmost() -> FrontmostAppInfo {
   }
 }
 
+fn show_main_window(handle: &AppHandle) {
+  let Some(window) = handle.get_webview_window("main") else {
+    return;
+  };
+
+  let _ = window.unminimize();
+  let _ = window.show();
+  let _ = window.set_focus();
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-  tauri::Builder::default()
+  let app = tauri::Builder::default()
     .plugin(tauri_plugin_clipboard_manager::init())
     .plugin(tauri_plugin_fs::init())
     .invoke_handler(tauri::generate_handler![
@@ -230,6 +242,17 @@ pub fn run() {
         let _ = window.hide();
       }
     })
-    .run(tauri::generate_context!())
-    .expect("error while running tauri application");
+    .build(tauri::generate_context!())
+    .expect("error while building tauri application");
+
+  app.run(|handle, event| {
+    #[cfg(target_os = "macos")]
+    if let RunEvent::Reopen {
+      has_visible_windows: false,
+      ..
+    } = event
+    {
+      show_main_window(handle);
+    }
+  });
 }
