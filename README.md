@@ -7,8 +7,7 @@ Clipboard Cleaner is a small Tauri + Vite utility that watches the macOS clipboa
 <img width="787" height="549" alt="image" src="https://github.com/user-attachments/assets/1d8aadc6-8c62-40dc-b4d1-b7420cbe1b5e" />
 
 
-## EXAMPLE
-Turn
+## EXAMPLE: Turn
 
 Error Type
 Console Error
@@ -16,14 +15,13 @@ Console Error
 Error Message
 
 
-
-    at Logger.error (src/lib/utils/logger.ts:989:27)
-    at Object.error (src/lib/utils/logger.ts:1138:57)
+at Logger.error (src/lib/utils/logger.ts:989:27)
+at Object.error (src/lib/utils/logger.ts:1138:57)
 
 Code Frame
   987 |     const category = this.determineCategory(module);
   988 |     if (this.shouldLog('error', category)) {
-> 989 |       this.browserConsole.error(this.formatMessage(module, message), ...args);
+989 |       this.browserConsole.error(this.formatMessage(module, message), ...args);
       |                           ^
   990 |     }
   991 |   }
@@ -33,15 +31,15 @@ Next.js version: 16.2.1 (Turbopack)
 
 
 
-into 
+## INTO 
 
 
 
-987 | const category = this.determineCategory(module);
+"987 | const category = this.determineCategory(module);
 988 | if (this.shouldLog('error', category)) {
-> 989 | this.browserConsole.error(this.formatMessage(module, message), ...args);
+989 | this.browserConsole.error(this.formatMessage(module, message), ...args);
 990 | }
-991 | }
+991 | }"
 
 
 
