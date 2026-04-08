@@ -1,6 +1,6 @@
 # Clipboard Cleanup (macOS clipboard sanitizer)
 
-Clipboard Cleaner is a small Tauri + Vite utility that watches the macOS clipboard, applies a configurable sanitization rule set, and rewrites the cleaned text so every paste stays tidy. The UI mimics a background utility (tray menu, floating window) rather than a full application to keep the utility as frictionless as BetterTouchTool-style helpers.
+Clean your clipboard of repeative noise when coding with ai-assited tools. Saves tokens by not including empty [spaces] or multiple line breaks. 
 
 
 <img width="801" height="569" alt="image" src="https://github.com/user-attachments/assets/157a68c2-5f08-4bdf-9c1f-5d1ff9d70cdb" />
